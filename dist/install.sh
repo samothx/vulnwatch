@@ -137,7 +137,7 @@ else
   chmod 0644 "$ETC/config.toml"
   echo "  generated $ETC/config.toml (host $HOST)"
 fi
-/usr/local/bin/vulnwatch --config "$ETC/config.toml" config check | head -2
+/usr/local/bin/vulnwatch --config "$ETC/config.toml" config check | sed -n 1,2p  # not head: closing the pipe early + pipefail aborts the install
 
 # --- collector upload token ------------------------------------------------------------------------
 if [ -n "$TOKEN_FILE" ]; then

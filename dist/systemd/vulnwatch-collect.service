@@ -1,0 +1,36 @@
+# vulnwatch collector: inventory of OS packages, running images (Trivy SBOM), lockfiles and
+# watch-list versions; uploaded to the analyzer (or written to its inbox on the analyzer host).
+# Runs as root: image SBOMs need the docker socket (root-equivalent anyway). Read-only on the host.
+[Unit]
+Description=vulnwatch: collect this host's software inventory
+Documentation=file:///usr/local/share/doc/vulnwatch/README.md
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vulnwatch --config /etc/vulnwatch/config.toml collect
+CacheDirectory=vulnwatch
+Environment=TRIVY_CACHE_DIR=/var/cache/vulnwatch/trivy TRIVY_DISABLE_TELEMETRY=true
+UMask=0027
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=idle
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+# Lockfile roots may live in home directories; read-only is enough.
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Only exists on the analyzer host; "-" = fine if absent.
+ReadWritePaths=-/var/lib/vulnwatch/inbox

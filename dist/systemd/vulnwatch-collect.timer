@@ -1,0 +1,12 @@
+[Unit]
+Description=vulnwatch: daily inventory collection
+
+[Timer]
+# After unattended-upgrades (~06:17), so the inventory shows today's patch level.
+OnCalendar=*-*-* 06:45
+RandomizedDelaySec=10min
+# Notebooks: catch up after sleep / power-off.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

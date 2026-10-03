@@ -1,0 +1,26 @@
+
+# --- vulnwatch (appended by vulnwatch install.sh) ---------------------------------------
+# vulnwatch passes --priority itself (critical → 5, high → 4); the rule value is the default.
+[[rules]]
+id = "vulnwatch_alert"
+match_event = "vulnwatch.alert"
+topic = "alert_security"
+priority = 4
+tags = ["shield", "warning"]
+title_prefix = "[VULN]"
+
+[[rules]]
+id = "vulnwatch_digest"
+match_event = "vulnwatch.digest"
+topic = "notify_tasks"
+priority = 2
+tags = ["shield", "memo"]
+title_prefix = "[VULNWATCH]"
+
+[[rules]]
+id = "vulnwatch_error"
+match_event = "vulnwatch.error"
+topic = "alert_services"
+priority = 3
+tags = ["shield", "warning"]
+title_prefix = "[VULN SCANNER]"

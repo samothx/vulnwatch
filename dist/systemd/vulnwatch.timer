@@ -1,0 +1,11 @@
+[Unit]
+Description=vulnwatch: daily vulnerability digest
+
+[Timer]
+# After the collectors (06:45 + up to 10 min) and logscan (07:15).
+OnCalendar=*-*-* 07:30
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

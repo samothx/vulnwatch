@@ -1,0 +1,74 @@
+# vulnwatch configuration (/etc/vulnwatch/config.toml)
+#
+# Collector (every host):  vulnwatch collect      [general] [collect] + watch.d/*.toml
+# Analyzer (one host):     vulnwatch run          [analyze] [[host]] [notify] [email] [llm]
+# `vulnwatch config check` validates this file and the watch list.
+
+[general]
+host = ""                                   # empty: first label of the hostname
+state_dir = "/var/lib/vulnwatch"            # inbox/, feeds/, reports/, state.json
+report_retention_days = 90
+
+[collect]
+packages = "auto"                           # auto | dpkg | pacman | none
+docker = true                               # images of running containers
+trivy = "/usr/local/bin/trivy"              # SBOM generation; empty = list images only
+trivy_cache = "/var/cache/vulnwatch/trivy"
+lockfile_roots = []                         # e.g. ["/home/thomas/develop"]
+lockfile_max_depth = 5
+watch_dir = "watch.d"                       # relative to this file
+# Collectors on other hosts upload; the analyzer host writes straight into its inbox.
+upload_url = ""                             # https://inv.services.etnur.net:8443/upload
+token_file = "/etc/vulnwatch/upload-token"  # root 0600; $VULNWATCH_UPLOAD_TOKEN overrides
+command_timeout_secs = 300
+
+[analyze]
+inbox = "inbox"                             # relative to state_dir
+trivy = "/usr/local/bin/trivy"
+trivy_cache = "trivy-cache"                 # relative to state_dir; DB ≈ 1.5 GiB
+feeds_max_age_hours = 20
+github_token_file = ""                      # optional; raises the GitHub API limit
+unfixed_max = "low"                         # cap for vulnerabilities without a fix (KEV excepted)
+image_os_max = "medium"                     # cap for OS packages inside images (KEV / high EPSS excepted)
+epss_raise = 0.1                            # EPSS ≥ this → one severity level up
+remind_days = 7                             # re-push unresolved ≥ notify.min_severity
+report_max_items = 15                       # per finding in the Markdown (JSON has all)
+http_timeout_secs = 120
+
+# One block per host whose inventory is expected. exposure: public | vpn | local
+# (local lowers non-exploited findings one level). stale_days: report a missing/old inventory.
+# [[host]]
+# name = "anubis"
+# exposure = "public"
+# stale_days = 2
+# context = "Debian web server: nginx in front of Docker apps."
+# lockfile_exposure = "public"              # lockfiles here belong to public apps (dev notebook)
+
+[notify]
+enabled = false
+command = "/usr/local/bin/ntfy-dispatcher"
+min_severity = "high"                       # vulnwatch.alert for new/reminded findings ≥ this
+digest = true                               # vulnwatch.digest every run
+
+[email]
+enabled = false
+to = []
+from = ""
+sendmail = "/usr/sbin/sendmail"
+min_severity = "medium"                     # mail when a finding ≥ this has new items
+on_errors = true
+html = true
+
+[llm]
+enabled = false                             # summary on top of the report; never changes findings
+provider = "venice"
+base_url = "https://api.venice.ai/api/v1"
+model = "deepseek-v4-flash"
+api_key_file = "/etc/vulnwatch/llm-api-key" # $VULNWATCH_API_KEY overrides
+timeout_secs = 300
+max_tokens = 4000
+json_mode = true
+max_findings = 40
+
+[llm.extra_body]
+venice_parameters = { include_venice_system_prompt = false, strip_thinking_response = true }

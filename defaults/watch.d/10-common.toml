@@ -1,0 +1,83 @@
+# Watch list: products the OS package trackers don't cover (third-party apt repos, binaries,
+# container images). One list for all hosts: an entry whose command is missing on a host, or
+# whose image isn't running there, is skipped silently.
+#
+#   version_cmd + version_regex   argv (no shell); first capture group = installed version
+#   image                         Docker repository; version = tag, or the OCI version label
+#   osv                           OSV package for vulnerability lookups (ecosystem + name)
+#   github                        owner/repo for the "newer release available" check
+#   exposure                      local | vpn | public (default: the host's)
+#   same_major                    compare only against releases on the installed major line
+
+# --- third-party apt repositories (not in the Debian security tracker) ------------------------
+
+[[watch]]
+name = "docker-engine"
+version_cmd = ["dpkg-query", "-W", "-f", "${Version}", "docker-ce"]
+version_regex = '^(?:\d+:)?(\d+\.\d+\.\d+)'
+osv = { ecosystem = "Go", name = "github.com/docker/docker" }
+github = "moby/moby"
+
+[[watch]]
+name = "containerd"
+version_cmd = ["dpkg-query", "-W", "-f", "${Version}", "containerd.io"]
+version_regex = '^(\d+\.\d+\.\d+)'
+osv = { ecosystem = "Go", name = "github.com/containerd/containerd/v2" }
+github = "containerd/containerd"
+
+[[watch]]
+name = "crowdsec"
+version_cmd = ["dpkg-query", "-W", "-f", "${Version}", "crowdsec"]
+version_regex = '^(\d+\.\d+\.\d+)'
+osv = { ecosystem = "Go", name = "github.com/crowdsecurity/crowdsec" }
+github = "crowdsecurity/crowdsec"
+
+[[watch]]
+name = "nodejs"
+version_cmd = ["node", "--version"]
+version_regex = '^v(\d+\.\d+\.\d+)'
+github = "nodejs/node"
+same_major = true                    # LTS line
+
+# --- container images -------------------------------------------------------------------
+
+[[watch]]
+name = "n8n"
+image = "n8nio/n8n"
+osv = { ecosystem = "npm", name = "n8n" }
+github = "n8n-io/n8n"
+
+[[watch]]
+name = "registry"
+image = "registry"
+github = "distribution/distribution"
+
+[[watch]]
+name = "qdrant"
+image = "qdrant/qdrant"
+github = "qdrant/qdrant"
+
+# --- desktop / notebook -------------------------------------------------------------------
+
+[[watch]]
+name = "syncthing"
+version_cmd = ["syncthing", "--version"]
+version_regex = 'syncthing v(\d+\.\d+\.\d+)'
+osv = { ecosystem = "Go", name = "github.com/syncthing/syncthing" }
+github = "syncthing/syncthing"
+exposure = "local"
+
+[[watch]]
+name = "tailscale"
+version_cmd = ["tailscale", "version"]
+version_regex = '^(\d+\.\d+\.\d+)'
+osv = { ecosystem = "Go", name = "tailscale.com" }
+github = "tailscale/tailscale"
+exposure = "local"
+
+[[watch]]
+name = "hyprland"
+version_cmd = ["hyprctl", "version"]
+version_regex = 'Hyprland (\d+\.\d+\.\d+)'
+github = "hyprwm/Hyprland"
+exposure = "local"

@@ -1,0 +1,42 @@
+# vulnwatch analyzer: matches all inventories in /var/lib/vulnwatch/inbox against the Debian/Arch
+# trackers, OSV and Trivy, weighs them with CISA KEV / EPSS / exposure, reports what is new.
+# Unprivileged system user; only network + its state dir. Host bits (OnFailure=, groups) in
+# vulnwatch.service.d/10-host.conf, written by install.sh.
+[Unit]
+Description=vulnwatch: daily vulnerability digest
+Documentation=file:///usr/local/share/doc/vulnwatch/README.md
+Wants=network-online.target
+# Started together (`systemctl start vulnwatch-collect vulnwatch`): analyze the fresh inventory.
+After=network-online.target vulnwatch-collect.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vulnwatch --config /etc/vulnwatch/config.toml run
+User=vulnwatch
+Group=vulnwatch
+Environment=TRIVY_DISABLE_TELEMETRY=true
+UMask=0027
+TimeoutStartSec=45min
+Nice=10
+IOSchedulingClass=idle
+MemoryMax=2G
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/vulnwatch -/var/spool/ntfy-dispatcher

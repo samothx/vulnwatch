@@ -12,6 +12,8 @@ Type=oneshot
 ExecStart=/usr/local/bin/vulnwatch --config /etc/vulnwatch/config.toml collect
 CacheDirectory=vulnwatch
 Environment=TRIVY_CACHE_DIR=/var/cache/vulnwatch/trivy TRIVY_DISABLE_TELEMETRY=true
+# systemd sets no $HOME for a root service; some version probes need one (`syncthing --version` panics).
+Environment=HOME=/root
 UMask=0027
 TimeoutStartSec=30min
 Nice=10

@@ -101,6 +101,9 @@ pub struct Analyze {
     /// OS-package vulnerabilities inside container images are capped at this (KEV and high
     /// EPSS excepted): stale base images carry hundreds, the fix is a re-pull, not a page.
     pub image_os_max: Severity,
+    /// Image vulnerabilities are capped at this (KEV excepted) while the registry still serves the
+    /// running build for its tag: `docker pull` would not change anything, so wait for upstream.
+    pub image_current_max: Severity,
     /// EPSS probability at or above which a finding is raised one level.
     pub epss_raise: f64,
     /// Re-alert unresolved findings ≥ notify.min_severity after this many days.
@@ -120,6 +123,7 @@ impl Default for Analyze {
             github_token_file: PathBuf::new(),
             unfixed_max: Severity::Low,
             image_os_max: Severity::Medium,
+            image_current_max: Severity::Low,
             epss_raise: 0.1,
             remind_days: 7,
             report_max_items: 15,
@@ -161,11 +165,14 @@ pub struct HostCfg {
     /// Exposure for lockfile findings when they differ from the host's own: the lockfiles on a
     /// dev notebook belong to apps that run publicly elsewhere.
     pub lockfile_exposure: Option<Exposure>,
+    /// Exposure of single images, keyed by image reference or container name (`*` wildcard):
+    /// a database without published ports on a public web server is not public itself.
+    pub image_exposure: BTreeMap<String, Exposure>,
 }
 
 impl Default for HostCfg {
     fn default() -> Self {
-        Self { name: String::new(), exposure: Exposure::Public, stale_days: 2, context: String::new(), lockfile_exposure: None }
+        Self { name: String::new(), exposure: Exposure::Public, stale_days: 2, context: String::new(), lockfile_exposure: None, image_exposure: BTreeMap::new() }
     }
 }
 

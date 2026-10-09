@@ -8,6 +8,7 @@ pub mod osv;
 pub mod outdated;
 pub mod policy;
 pub mod trivy;
+pub mod upstream;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -92,6 +93,9 @@ pub fn run(cfg: &Config, opts: &Options, state: &mut State) -> Result<Report> {
             errors.push(format!("github token: {e:#}"));
             None
         });
+    let registry = upstream::Registry::new(fetcher.agent(), opts.offline);
+    // (host, image reference) → is a newer build published?
+    let mut upstreams: BTreeMap<(String, String), upstream::Status> = BTreeMap::new();
     let github = outdated::GitHub::new(fetcher.agent(), gh_token, feeds_dir.join("github"), cfg.analyze.feeds_max_age_hours, opts.offline);
 
     let mut vulns: Vec<Vuln> = Vec::new();
@@ -182,11 +186,18 @@ pub fn run(cfg: &Config, opts: &Options, state: &mut State) -> Result<Report> {
             }
         }
 
+        // Upstream check, only for images that have something to report
+        let vulnerable: BTreeSet<&str> = host_vulns.iter().filter(|v| v.kind == Kind::Image).map(|v| v.component.as_str()).collect();
+        for img in inv.images.iter().filter(|i| vulnerable.contains(i.reference.as_str())) {
+            upstreams.insert((inv.host.clone(), img.reference.clone()), registry.status(img));
+        }
+
         // Policy
         for v in host_vulns.iter_mut() {
             intel.annotate(v);
             let exp = exposure_for(inv, v, &hc);
-            policy::apply(v, exp, &cfg.analyze);
+            let current = v.kind == Kind::Image && upstreams.get(&(inv.host.clone(), v.component.clone())).is_some_and(upstream::Status::is_current);
+            policy::apply(v, exp, current, &cfg.analyze);
         }
         vulns.extend(host_vulns);
 
@@ -262,6 +273,16 @@ pub fn run(cfg: &Config, opts: &Options, state: &mut State) -> Result<Report> {
             if img.repo_tags.is_empty() {
                 f.title = format!("{} (untagged image of {})", f.title, img.containers.join(", "));
             }
+            if let Some(up) = upstreams.get(&(f.host.clone(), f.component.clone())) {
+                f.detail = format!("{}\n\n{}", f.detail, up.describe(img.tag().unwrap_or(&img.reference)));
+                match up {
+                    upstream::Status::Current { .. } => {
+                        f.action = format!("nothing to do yet: no newer {} is published (checked daily; alerts again once upstream ships a new build)", f.component)
+                    }
+                    upstream::Status::Newer { .. } => f.action = format!("a newer {} is published: pull it and recreate its containers on {}", f.component, f.host),
+                    upstream::Status::Unknown(_) => {}
+                }
+            }
         }
     }
     findings.extend(extra);
@@ -303,8 +324,14 @@ fn load_feed<T>(fetcher: &Fetcher, feed: &feeds::Feed, parse: fn(&std::path::Pat
     }
 }
 
-/// A watch entry's own exposure, or the host's lockfile_exposure, wins over the host default.
+/// A watch entry's own exposure, the host's lockfile_exposure, or a matching image_exposure entry
+/// wins over the host default.
 fn exposure_for(inv: &Inventory, v: &Vuln, host: &crate::config::HostCfg) -> Exposure {
+    if v.kind == Kind::Image
+        && let Some(e) = image_exposure(inv, &v.component, host)
+    {
+        return e;
+    }
     if v.kind == Kind::Watch
         && let Some(w) = inv.watched.iter().find(|w| w.name == v.component)
         && let Ok(e) = w.exposure.parse()
@@ -317,6 +344,40 @@ fn exposure_for(inv: &Inventory, v: &Vuln, host: &crate::config::HostCfg) -> Exp
         return e;
     }
     host.exposure
+}
+
+/// The most exposed matching entry: an image shared by several containers is as exposed as the
+/// most exposed of them.
+fn image_exposure(inv: &Inventory, reference: &str, host: &crate::config::HostCfg) -> Option<Exposure> {
+    if host.image_exposure.is_empty() {
+        return None;
+    }
+    let containers = inv.images.iter().find(|i| i.reference == reference).map(|i| i.containers.as_slice()).unwrap_or_default();
+    host.image_exposure
+        .iter()
+        .filter(|(pat, _)| glob(pat, reference) || containers.iter().any(|c| glob(pat, c)))
+        .map(|(_, e)| *e)
+        .max()
+}
+
+/// `*` matches any run of characters; everything else literally.
+fn glob(pat: &str, s: &str) -> bool {
+    let parts: Vec<&str> = pat.split('*').collect();
+    if parts.len() == 1 {
+        return pat == s;
+    }
+    let (first, last) = (parts[0], parts[parts.len() - 1]);
+    if s.len() < first.len() + last.len() || !s.starts_with(first) || !s.ends_with(last) {
+        return false;
+    }
+    let mut rest = &s[first.len()..s.len() - last.len()];
+    for p in &parts[1..parts.len() - 1] {
+        match rest.find(p) {
+            Some(i) => rest = &rest[i + p.len()..],
+            None => return false,
+        }
+    }
+    true
 }
 
 fn health(host: &str, sev: Severity, title: String, detail: String, key: &str) -> Finding {
@@ -333,5 +394,36 @@ fn health(host: &str, sev: Severity, title: String, detail: String, key: &str) -
         new_count: 0,
         remind: false,
         fingerprint: format!("{host}|Health|{key}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inventory::Image;
+
+    #[test]
+    fn globs() {
+        assert!(glob("postgres:*", "postgres:15-alpine"));
+        assert!(glob("*umami*", "docker.umami.is/umami-software/umami:latest"));
+        assert!(glob("umami-db", "umami-db"));
+        assert!(!glob("umami-db", "umami"));
+        assert!(!glob("a*a", "a"));
+        assert!(glob("*", ""));
+    }
+
+    #[test]
+    fn image_exposure_by_reference_or_container() {
+        let inv = Inventory {
+            images: vec![Image { reference: "postgres:15-alpine".into(), containers: vec!["umami-db".into(), "other-db".into()], ..Default::default() }],
+            ..Default::default()
+        };
+        let mut hc = crate::config::HostCfg::default();
+        assert_eq!(image_exposure(&inv, "postgres:15-alpine", &hc), None);
+        hc.image_exposure.insert("umami-db".into(), Exposure::Local);
+        assert_eq!(image_exposure(&inv, "postgres:15-alpine", &hc), Some(Exposure::Local));
+        hc.image_exposure.insert("other-*".into(), Exposure::Vpn);
+        assert_eq!(image_exposure(&inv, "postgres:15-alpine", &hc), Some(Exposure::Vpn), "most exposed container wins");
+        assert_eq!(image_exposure(&inv, "nginx:alpine", &hc), None);
     }
 }

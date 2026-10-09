@@ -38,12 +38,29 @@ lists its vulnerabilities, worst first, with fix version, KEV and EPSS.
 Applied to every vulnerability, in this order:
 
 1. Source severity: Debian urgency, Arch severity, GHSA label or CVSS v3 score, Trivy.
-2. `exposure = "local"` (host, watch entry or `lockfile_exposure`) lowers it one level.
+2. `exposure = "local"` (host, watch entry, `lockfile_exposure` or `image_exposure`) lowers it one level.
 3. EPSS ≥ `epss_raise` (default 0.1) raises it one level.
 4. No fix available: capped at `unfixed_max` (low).
 5. OS packages *inside images* are capped at `image_os_max` (medium) unless EPSS is high. Stale
    base images carry hundreds of them, and the fix is a re-pull, not a page.
-6. CISA KEV (exploited in the wild): at least high, critical when a fix exists.
+6. Images whose registry still serves the running build for their tag are capped at
+   `image_current_max` (low): `docker pull` would change nothing, so the finding waits for upstream
+   instead of alerting daily. Once the tag points to a new build the cap lifts, the severity rises,
+   and the finding counts as new again (push). Locally built or private images are "not checked".
+7. CISA KEV (exploited in the wild): at least high, critical when a fix exists.
+
+The upstream check is an anonymous `HEAD /v2/<repo>/manifests/<tag>` against the image's registry
+(bearer token from the registry's own https realm), compared with the image's `RepoDigests`. It runs
+on the analyzer, only for images with findings, and is skipped with `--offline`.
+
+Per-image exposure, by image reference or container name (`*` wildcard; the most exposed match wins):
+
+```toml
+[[host]]
+name = "balrog"
+exposure = "public"
+image_exposure = { "umami-db" = "local", "postgres:*" = "local" }
+```
 
 Kernel packages inside images (`linux-libc-dev` …) are ignored: they are never the running kernel.
 

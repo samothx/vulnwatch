@@ -115,3 +115,7 @@ sudo ./install.sh --role collector --upload-url https://inv.services.etnur.net:8
 Files: `/etc/vulnwatch/{config.toml,watch.d/,upload-token,tokens/,llm-api-key}`,
 `/var/lib/vulnwatch/{inbox/,feeds/,trivy-cache/,reports/,state.json}`, `/var/cache/vulnwatch/trivy`.
 ntfy events: `vulnwatch.alert` (≥ high, new or reminder), `vulnwatch.digest`, `vulnwatch.error`.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

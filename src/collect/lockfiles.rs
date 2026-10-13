@@ -1,4 +1,5 @@
-//! Dependency lockfiles of own projects: Cargo.lock (crates.io) and package-lock.json (npm).
+//! Dependency lockfiles of own projects: Cargo.lock (crates.io), package-lock.json and
+//! pnpm-lock.yaml (npm).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -7,6 +8,8 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::inventory::{Dep, Lockfile};
+
+const LOCKFILES: &[&str] = &["Cargo.lock", "package-lock.json", "pnpm-lock.yaml"];
 
 pub fn collect(roots: &[PathBuf], max_depth: usize, skip: &[String], errors: &mut Vec<String>) -> Vec<Lockfile> {
     let mut found = Vec::new();
@@ -19,6 +22,7 @@ pub fn collect(roots: &[PathBuf], max_depth: usize, skip: &[String], errors: &mu
         let res = match p.file_name().and_then(|n| n.to_str()) {
             Some("Cargo.lock") => cargo(&p).map(|d| ("crates.io", d)),
             Some("package-lock.json") => npm(&p).map(|d| ("npm", d)),
+            Some("pnpm-lock.yaml") => pnpm(&p).map(|d| ("npm", d)),
             _ => continue,
         };
         match res {
@@ -42,7 +46,7 @@ fn walk(dir: &Path, depth: usize, max: usize, skip: &[String], found: &mut Vec<P
             if depth < max && !skip.iter().any(|s| s == name.as_ref()) && !name.starts_with('.') {
                 walk(&e.path(), depth + 1, max, skip, found);
             }
-        } else if ft.is_file() && (name == "Cargo.lock" || name == "package-lock.json") {
+        } else if ft.is_file() && LOCKFILES.contains(&name.as_ref()) {
             found.push(e.path());
         }
     }
@@ -113,6 +117,62 @@ pub fn npm(p: &Path) -> Result<Vec<Dep>> {
     Ok(set.into_iter().collect())
 }
 
+/// pnpm-lock.yaml v5.x, v6 and v9: the keys of the top-level `packages:` map name every
+/// resolved package. Parsed line by line (no YAML dependency); a file may hold several
+/// documents (pnpm 10 puts config dependencies in a leading one), each with its own map.
+pub fn pnpm(p: &Path) -> Result<Vec<Dep>> {
+    let text = std::fs::read_to_string(p)?;
+    let mut set = BTreeSet::new();
+    let mut slash_keys = false;
+    let mut in_packages = false;
+    let mut seen_version = false;
+    for line in text.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if !line.starts_with(' ') {
+            in_packages = line.trim_end() == "packages:";
+            if let Some(v) = line.strip_prefix("lockfileVersion:") {
+                let v = v.trim().trim_matches(|c| c == '\'' || c == '"');
+                // 5.x keys are `/name/1.2.3_peers`, 6+ use `/name@1.2.3(peers)`
+                slash_keys = v.split('.').next().and_then(|m| m.parse::<u32>().ok()).is_some_and(|m| m < 6);
+                seen_version = true;
+            }
+            continue;
+        }
+        if !in_packages || line.starts_with("   ") {
+            continue;
+        }
+        let Some(key) = line.trim().strip_suffix(':').or_else(|| line.trim().strip_suffix(": {}")) else {
+            continue;
+        };
+        if let Some(d) = pnpm_key(key.trim_matches(|c| c == '\'' || c == '"'), slash_keys) {
+            set.insert(d);
+        }
+    }
+    if !seen_version {
+        anyhow::bail!("parsing pnpm-lock.yaml: no lockfileVersion");
+    }
+    Ok(set.into_iter().collect())
+}
+
+/// Registry packages only: tarball, git, `file:` and `link:` entries have no semver version.
+fn pnpm_key(key: &str, slash_keys: bool) -> Option<Dep> {
+    let key = key.strip_prefix('/').unwrap_or(key);
+    let (name, version) = if slash_keys {
+        let (name, ver) = key.rsplit_once('/')?;
+        (name, ver.split('_').next()?)
+    } else {
+        let key = key.split('(').next()?;
+        let at = key.rfind('@').filter(|&i| i > 0)?;
+        (&key[..at], &key[at + 1..])
+    };
+    if name.is_empty() || !version.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(Dep { name: name.into(), version: version.into() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +225,73 @@ source = "git+https://example.org/fork#abc"
         let p = dir.path().join("package-lock.json");
         std::fs::write(&p, r#"{"lockfileVersion":1,"dependencies":{"a":{"version":"1.0.0","dependencies":{"b":{"version":"2.0.0"}}}}}"#).unwrap();
         assert_eq!(npm(&p).unwrap().len(), 2);
+    }
+
+    fn deps(v: &[Dep]) -> Vec<String> {
+        v.iter().map(|d| format!("{}@{}", d.name, d.version)).collect()
+    }
+
+    #[test]
+    fn pnpm_v9() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pnpm-lock.yaml");
+        std::fs::write(
+            &p,
+            r#"lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      next:
+        specifier: 15.5.2
+        version: 15.5.2(react@19.1.0)
+
+packages:
+
+  '@next/env@15.5.2':
+    resolution: {integrity: sha512-x}
+
+  next@15.5.2:
+    resolution: {integrity: sha512-y}
+    engines: {node: '>=18'}
+    peerDependencies:
+      react: ^19
+
+  gitdep@https://codeload.github.com/o/r/tar.gz/abc:
+    resolution: {tarball: https://codeload.github.com/o/r/tar.gz/abc}
+    version: 1.0.0
+
+snapshots:
+
+  next@15.5.2(react@19.1.0):
+    dependencies:
+      '@next/env': 15.5.2
+
+  ignored@9.9.9: {}
+"#,
+        )
+        .unwrap();
+        assert_eq!(deps(&pnpm(&p).unwrap()), vec!["@next/env@15.5.2", "next@15.5.2"]);
+    }
+
+    #[test]
+    fn pnpm_v6_and_v5() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pnpm-lock.yaml");
+        std::fs::write(
+            &p,
+            "lockfileVersion: '6.0'\n\npackages:\n\n  /@scope/a@1.2.3(react@18.2.0):\n    resolution: {integrity: x}\n  /b@2.0.0:\n    dev: false\n",
+        )
+        .unwrap();
+        assert_eq!(deps(&pnpm(&p).unwrap()), vec!["@scope/a@1.2.3", "b@2.0.0"]);
+        std::fs::write(
+            &p,
+            "lockfileVersion: 5.4\n\npackages:\n\n  /@scope/a/1.2.3_react@18.2.0:\n    resolution: {integrity: x}\n  /b/2.0.0:\n    dev: false\n",
+        )
+        .unwrap();
+        assert_eq!(deps(&pnpm(&p).unwrap()), vec!["@scope/a@1.2.3", "b@2.0.0"]);
+        std::fs::write(&p, "not: a lockfile\n").unwrap();
+        assert!(pnpm(&p).is_err());
     }
 }

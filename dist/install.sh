@@ -15,7 +15,7 @@
 #   --host NAME           short host name for a generated config (default: hostname -s)
 #   --upload-url URL      collector: analyzer endpoint, e.g. https://inv.services.etnur.net:8443/upload
 #   --token-file FILE     collector: upload token to install as /etc/vulnwatch/upload-token
-#   --lockfile-root DIR   collector: search Cargo.lock / package-lock.json below DIR (repeatable)
+#   --lockfile-root DIR   collector: search Cargo.lock / package-lock.json / pnpm-lock.yaml below DIR (repeatable)
 #   --collectors "a b"    analyzer: remote collectors that get an upload token (kept if present)
 #   --no-trivy            don't install Trivy (no image SBOMs on this collector)
 #   --no-first-run        don't run once at the end (timers are still enabled)

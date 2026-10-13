@@ -8,7 +8,7 @@ every host                               analyzer host (anubis)
 vulnwatch collect   (timer 06:45)  ──▶   inbox/<host>.json.gz  (nginx PUT, per-host token, VPN only)
   dpkg-query / pacman -Q                 vulnwatch run   (timer 07:30, user vulnwatch)
   running images → trivy SBOM              Debian security tracker   → OS packages (Debian)
-  Cargo.lock / package-lock.json           Arch security tracker     → OS packages (Arch, CachyOS)
+  Cargo.lock / package-lock / pnpm-lock    Arch security tracker     → OS packages (Arch, CachyOS)
   watch list: version_cmd / image tag      OSV.dev                   → lockfiles, watch list
                                            trivy sbom                → image contents
                                            GitHub releases           → newer version available
@@ -54,7 +54,7 @@ Kernel packages inside images (`linux-libc-dev` …) are ignored: they are never
 - **Arch/CachyOS:** the Arch tracker lags behind, and CachyOS-only builds (`linux-cachyos`) aren't in it.
   The report says so; the watch list fills some of the gap.
 - **Images:** whatever Trivy finds in the SBOM (OS packages, node_modules, Go binaries, …).
-- **Lockfiles:** `Cargo.lock` (registry crates only) and `package-lock.json` v1–v3.
+- **Lockfiles:** `Cargo.lock` (registry crates only) and `package-lock.json` v1–v3 and `pnpm-lock.yaml` v5.x/v6/v9 (registry packages only).
 - Trivy runs with `--disable-telemetry --skip-version-check`.
 
 ## CLI

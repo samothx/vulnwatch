@@ -30,6 +30,7 @@ feeds_max_age_hours = 20
 github_token_file = ""                      # optional; raises the GitHub API limit
 unfixed_max = "low"                         # cap for vulnerabilities without a fix (KEV excepted)
 image_os_max = "medium"                     # cap for OS packages inside images (KEV / high EPSS excepted)
+image_current_max = "low"                   # cap for image vulns while the registry serves the running build (nothing to pull; KEV excepted)
 epss_raise = 0.1                            # EPSS ≥ this → one severity level up
 remind_days = 7                             # re-push unresolved ≥ notify.min_severity
 report_max_items = 15                       # per finding in the Markdown (JSON has all)

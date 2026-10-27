@@ -68,9 +68,10 @@ impl Intel {
     }
 }
 
-/// Order matters: exposure and EPSS adjust the source severity, then findings without a fix and
-/// OS packages inside images are capped, and finally KEV (exploited in the wild) overrides everything.
-pub fn apply(v: &mut Vuln, exposure: Exposure, cfg: &Analyze) {
+/// Order matters: exposure and EPSS adjust the source severity, then findings without a fix,
+/// OS packages inside images and images with nothing newer to pull (`upstream_current`) are
+/// capped, and finally KEV (exploited in the wild) overrides everything.
+pub fn apply(v: &mut Vuln, exposure: Exposure, upstream_current: bool, cfg: &Analyze) {
     let mut s = v.base_severity;
     if s > Severity::Info {
         if exposure == Exposure::Local {
@@ -85,6 +86,9 @@ pub fn apply(v: &mut Vuln, exposure: Exposure, cfg: &Analyze) {
         let hot = v.epss.is_some_and(|e| e >= cfg.epss_raise);
         if v.kind == Kind::Image && v.source == "trivy-os" && !hot {
             s = s.min(cfg.image_os_max);
+        }
+        if v.kind == Kind::Image && upstream_current {
+            s = s.min(cfg.image_current_max);
         }
     }
     if v.kev {
@@ -124,30 +128,35 @@ mod tests {
     fn policy_order() {
         let cfg = Analyze::default();
         let mut v = vuln(Severity::High, true);
-        apply(&mut v, Exposure::Public, &cfg);
+        apply(&mut v, Exposure::Public, false, &cfg);
         assert_eq!(v.severity, Severity::High);
-        apply(&mut v, Exposure::Local, &cfg);
+        apply(&mut v, Exposure::Local, false, &cfg);
         assert_eq!(v.severity, Severity::Medium);
         v.epss = Some(0.5);
-        apply(&mut v, Exposure::Public, &cfg);
+        apply(&mut v, Exposure::Public, false, &cfg);
         assert_eq!(v.severity, Severity::Critical);
         let mut u = vuln(Severity::Critical, false);
-        apply(&mut u, Exposure::Public, &cfg);
+        apply(&mut u, Exposure::Public, false, &cfg);
         assert_eq!(u.severity, Severity::Low, "unfixed is capped");
         u.kev = true;
-        apply(&mut u, Exposure::Local, &cfg);
+        apply(&mut u, Exposure::Local, false, &cfg);
         assert_eq!(u.severity, Severity::High, "KEV beats cap and exposure");
         let mut img = vuln(Severity::Critical, true);
         img.kind = Kind::Image;
         img.source = "trivy-os".into();
-        apply(&mut img, Exposure::Public, &cfg);
+        apply(&mut img, Exposure::Public, false, &cfg);
         assert_eq!(img.severity, Severity::Medium, "image OS layer capped");
         img.source = "trivy-lang".into();
-        apply(&mut img, Exposure::Public, &cfg);
+        apply(&mut img, Exposure::Public, false, &cfg);
         assert_eq!(img.severity, Severity::Critical, "app layer not capped");
+        apply(&mut img, Exposure::Public, true, &cfg);
+        assert_eq!(img.severity, Severity::Low, "nothing newer to pull: wait for upstream");
+        img.kev = true;
+        apply(&mut img, Exposure::Public, true, &cfg);
+        assert_eq!(img.severity, Severity::Critical, "KEV still shouts");
         let mut i = vuln(Severity::Info, true);
         i.epss = Some(0.9);
-        apply(&mut i, Exposure::Public, &cfg);
+        apply(&mut i, Exposure::Public, false, &cfg);
         assert_eq!(i.severity, Severity::Info);
     }
 

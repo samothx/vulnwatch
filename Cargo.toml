@@ -1,6 +1,6 @@
 [package]
 name = "vulnwatch"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 description = "Inventory-based vulnerability digest: collectors report what is installed, the analyzer matches it against Debian/Arch trackers, OSV, Trivy, CISA KEV and EPSS."

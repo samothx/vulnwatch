@@ -14,13 +14,14 @@ vulnwatch collect   (timer 06:45)  ──▶   inbox/<host>.json.gz  (nginx PUT,
                                            GitHub releases           → newer version available
                                            CISA KEV + EPSS           → exploited / likely exploited
                                          policy → findings → diff vs state → report, ntfy, mail
-                                         optional LLM summary (prose only, cannot change findings)
+                                         optional LLM summary (ranks + explains findings, cannot change them)
 ```
 
 ## What you get
 
 One **finding per thing you act on**: a host's OS packages (`apt upgrade on anubis`), an image
-(`pull/rebuild n8nio/n8n:1.121.0`), a lockfile (`cargo update in …`), a watched product
+(`pull n8nio/n8n:1.121.0`, or `nothing to do yet` when no published build fixes it), a source
+tree's lockfile (`cargo update in …`), a watched product
 (`upgrade crowdsec to ≥ 1.8.2`), a newer release, or a missing/stale inventory. Each finding
 lists its vulnerabilities, worst first, with fix version, KEV and EPSS.
 
@@ -38,31 +39,86 @@ lists its vulnerabilities, worst first, with fix version, KEV and EPSS.
 Applied to every vulnerability, in this order:
 
 1. Source severity: Debian urgency, Arch severity, GHSA label or CVSS v3 score, Trivy.
-2. `exposure = "local"` (host, watch entry, `lockfile_exposure` or `image_exposure`) lowers it one level.
-3. EPSS ≥ `epss_raise` (default 0.1) raises it one level.
-4. No fix available: capped at `unfixed_max` (low).
-5. OS packages *inside images* are capped at `image_os_max` (medium) unless EPSS is high. Stale
-   base images carry hundreds of them, and the fix is a re-pull, not a page.
-6. Images whose registry still serves the running build for their tag are capped at
-   `image_current_max` (low): `docker pull` would change nothing, so the finding waits for upstream
-   instead of alerting daily. Once the tag points to a new build the cap lifts, the severity rises,
-   and the finding counts as new again (push). Locally built or private images are "not checked".
-7. CISA KEV (exploited in the wild): at least high, critical when a fix exists.
+2. EPSS ≥ `epss_raise` (default 0.1) raises it one level.
+3. No fix available: capped at `unfixed_max` (low).
+4. OS packages *inside images* are capped at `image_os_max` (medium); a high EPSS lifts them one
+   level above that at most. Stale base images carry hundreds of them, the fix is a re-pull, not a
+   page, and EPSS rates the library bug in general, not whether this image ever feeds it attacker
+   input (brotli pulled in by curl ≠ nginx decoding requests).
+5. Image vulnerabilities **no pull can fix yet** are capped at `image_current_max` (low): the
+   registry still serves the running build for the tag, or it serves a newer build that still
+   ships the same package version (see below). The finding then says "nothing to do yet" and
+   waits for upstream instead of alerting daily; once a fixing build is published the cap lifts and
+   the vulnerability counts as new again (push). Locally built or private images are "not checked".
+6. Exposure of what is affected (host `exposure`, watch entry, `lockfile_exposure`,
+   `image_exposure`): `local` lowers the result one level (min low), `vpn` caps it at `vpn_max`
+   (medium), `trusted` (the admin plus a named outside party, e.g. a VPN customer) at
+   `trusted_max` (low).
+7. Source trees (lockfiles) deployed as an image (`deployed_as`): capped at `lockfile_stale_max`
+   (low) where the deployed image runs another version and isn't affected, or reports the same
+   vulnerability itself (see below).
+8. CISA KEV (exploited in the wild): at least high, critical when a fix exists.
+9. `[[triage]]`: a human decision caps one vulnerability (never a KEV one), shown with its reason.
 
-The upstream check is an anonymous `HEAD /v2/<repo>/manifests/<tag>` against the image's registry
-(bearer token from the registry's own https realm), compared with the image's `RepoDigests`. It runs
-on the analyzer, only for images with findings, and is skipped with `--offline`.
+**Upstream check.** An anonymous `HEAD /v2/<repo>/manifests/<tag>` against the image's registry
+(bearer token from the registry's own https realm), compared with the image's `RepoDigests`. When
+the tag points to a newer build, that build is scanned straight from the registry
+(`trivy image --image-src remote`, `upstream_scan = true`; result cached per digest), and every
+vulnerability it still ships counts as "waiting for upstream". The action then says how many a pull
+fixes ("fixes 15 of 64") or "nothing to do yet". Containers still running an older, now untagged
+build of a tag that was pulled since are checked against the tag they were started with, and the
+action is "recreate". Runs on the analyzer, only for images with fixable findings; skipped with
+`--offline`.
 
-Per-image exposure, by image reference or container name (`*` wildcard; the most exposed match wins):
+Per-image exposure, by image reference (default for its containers) or container name (overrides
+for that container), `*` wildcard. An image is as exposed as its most exposed container; containers
+without an entry keep the host's exposure:
 
 ```toml
 [[host]]
-name = "balrog"
+name = "anubis"
 exposure = "public"
-image_exposure = { "umami-db" = "local", "postgres:*" = "local" }
+image_exposure = { "umami-db" = "local", "postgres:*" = "vpn", "customer-*" = "trusted" }
+```
+
+**Source trees.** Lockfiles are checkouts, not services ("source tree" in the report). Map them to
+the image they are deployed as and each vulnerability is compared with that image's SBOM:
+
+```toml
+[[host]]
+name = "zeno"
+exposure = "local"
+lockfile_exposure = "public"
+deployed_as = { "*/shop/package-lock.json" = "registry.example/shop:*" }
+```
+
+Reported under the image itself or older than the deployed version → capped; same version, or not
+in the image (build/dev dependency, or bundled into JS chunks) → kept, with a note.
+
+**Triage.** For what no rule can know (reachability):
+
+```toml
+[[triage]]
+id = "CVE-2026-111497"
+package = "brotli-libs"          # glob, optional
+component = "nginx:*"            # image reference, container or lockfile glob, optional
+host = ""                        # optional
+max = "low"                      # default low
+reason = "only via curl/freetype; nothing decodes attacker-supplied brotli"
+until = "2026-12-31"             # optional; after that the entry is ignored and noted
 ```
 
 Kernel packages inside images (`linux-libc-dev` …) are ignored: they are never the running kernel.
+
+## AI summary (optional, `[llm]`)
+
+The model gets the findings as numbered references (F1, F2, …) with host, kind (container image /
+source tree / OS packages), containers, exposure, packages and the action, and answers only with
+up to six picks `{"finding": "F3", "why": "…"}` plus one "can wait" sentence. vulnwatch prints the
+host, target, containers and action next to each "why", so the model cannot move a vulnerability
+onto a container that doesn't have it. Each sentence is checked against its own finding and
+dropped (noted under "Coverage notes") when it cites an id or version that isn't in that finding,
+or names another finding's container, image, project or package (`next.js` counts as `next`).
 
 ## Coverage and limits
 

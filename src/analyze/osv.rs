@@ -166,6 +166,7 @@ pub fn to_vuln(q: &Query, d: &Value) -> Option<Vuln> {
         epss: None,
         new: false,
         fingerprint: String::new(),
+        note: String::new(),
     };
     v.make_fingerprint();
     Some(v)

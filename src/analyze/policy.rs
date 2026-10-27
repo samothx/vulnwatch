@@ -68,27 +68,35 @@ impl Intel {
     }
 }
 
-/// Order matters: exposure and EPSS adjust the source severity, then findings without a fix,
-/// OS packages inside images and images with nothing newer to pull (`upstream_current`) are
-/// capped, and finally KEV (exploited in the wild) overrides everything.
-pub fn apply(v: &mut Vuln, exposure: Exposure, upstream_current: bool, cfg: &Analyze) {
+/// Order matters: EPSS adjusts the source severity, then findings without a fix, OS packages
+/// inside images and image vulnerabilities no pull can fix yet (`waiting_upstream`) are capped,
+/// then exposure applies to that result (`local`: one level lower, min low; `vpn` / `trusted`:
+/// capped), and finally KEV (exploited in the wild) overrides everything.
+///
+/// A high EPSS lifts an image OS-package vulnerability at most one level above `image_os_max`:
+/// EPSS rates the library bug in general, not whether this image ever feeds it attacker input
+/// (brotli pulled in by curl/freetype ≠ nginx decoding requests). `[[triage]]` records that.
+pub fn apply(v: &mut Vuln, exposure: Exposure, waiting_upstream: bool, cfg: &Analyze) {
     let mut s = v.base_severity;
     if s > Severity::Info {
-        if exposure == Exposure::Local {
-            s = s.lowered().max(Severity::Low);
-        }
-        if v.epss.is_some_and(|e| e >= cfg.epss_raise) {
+        let hot = v.epss.is_some_and(|e| e >= cfg.epss_raise);
+        if hot {
             s = s.raised();
         }
         if !v.fix_available {
             s = s.min(cfg.unfixed_max);
         }
-        let hot = v.epss.is_some_and(|e| e >= cfg.epss_raise);
-        if v.kind == Kind::Image && v.source == "trivy-os" && !hot {
-            s = s.min(cfg.image_os_max);
+        if v.kind == Kind::Image && v.source == "trivy-os" {
+            s = s.min(if hot { cfg.image_os_max.raised() } else { cfg.image_os_max });
         }
-        if v.kind == Kind::Image && upstream_current {
+        if v.kind == Kind::Image && waiting_upstream {
             s = s.min(cfg.image_current_max);
+        }
+        match exposure {
+            Exposure::Local => s = s.lowered().max(Severity::Low),
+            Exposure::Vpn => s = s.min(cfg.vpn_max),
+            Exposure::Trusted => s = s.min(cfg.trusted_max),
+            Exposure::Public => {}
         }
     }
     if v.kev {
@@ -121,6 +129,7 @@ mod tests {
             epss: None,
             new: false,
             fingerprint: String::new(),
+            note: String::new(),
         }
     }
 
@@ -158,6 +167,34 @@ mod tests {
         i.epss = Some(0.9);
         apply(&mut i, Exposure::Public, false, &cfg);
         assert_eq!(i.severity, Severity::Info);
+    }
+
+    #[test]
+    fn exposure_caps() {
+        let cfg = Analyze::default();
+        let mut v = vuln(Severity::Critical, true);
+        apply(&mut v, Exposure::Vpn, false, &cfg);
+        assert_eq!(v.severity, Severity::Medium, "vpn caps at medium");
+        apply(&mut v, Exposure::Trusted, false, &cfg);
+        assert_eq!(v.severity, Severity::Low, "trusted caps at low");
+        v.kev = true;
+        apply(&mut v, Exposure::Trusted, false, &cfg);
+        assert_eq!(v.severity, Severity::Critical, "KEV beats exposure caps");
+    }
+
+    #[test]
+    fn epss_lifts_image_os_one_level_only() {
+        let cfg = Analyze::default();
+        let mut v = vuln(Severity::Critical, true);
+        v.kind = Kind::Image;
+        v.source = "trivy-os".into();
+        v.epss = Some(0.33);
+        apply(&mut v, Exposure::Public, false, &cfg);
+        assert_eq!(v.severity, Severity::High, "hot library CVE in an image: medium cap + 1");
+        apply(&mut v, Exposure::Local, false, &cfg);
+        assert_eq!(v.severity, Severity::Medium, "local: one level below the public result");
+        apply(&mut v, Exposure::Public, true, &cfg);
+        assert_eq!(v.severity, Severity::Low, "newest build still ships it: wait");
     }
 
     #[test]

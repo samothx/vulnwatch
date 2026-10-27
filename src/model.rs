@@ -27,7 +27,7 @@ impl Kind {
         match self {
             Kind::Os => "OS packages",
             Kind::Image => "image",
-            Kind::Lockfile => "lockfile",
+            Kind::Lockfile => "source tree",
             Kind::Watch => "watched",
             Kind::Outdated => "outdated",
             Kind::Health => "inventory",
@@ -68,6 +68,9 @@ pub struct Vuln {
     #[serde(default)]
     pub new: bool,
     pub fingerprint: String,
+    /// Why the policy changed its severity beyond the usual rules (stale lockfile, triage, …).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
 }
 
 impl Vuln {
@@ -102,6 +105,9 @@ pub struct Finding {
     #[serde(default)]
     pub remind: bool,
     pub fingerprint: String,
+    /// Who can reach it (image/lockfile/watch findings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<crate::config::Exposure>,
 }
 
 impl Finding {

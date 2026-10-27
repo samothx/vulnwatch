@@ -102,6 +102,53 @@ impl Trivy {
     }
 }
 
+impl Trivy {
+    /// Scans an image straight from its registry (`repo@sha256:…`) without docker: used to see
+    /// what a newer published build still ships. Layers are analyzed once (Trivy's cache).
+    pub fn scan_remote(&self, reference: &str) -> Result<Vec<Vuln>> {
+        std::fs::create_dir_all(&self.tmp).with_context(|| format!("creating {}", self.tmp.display()))?;
+        let safe: String = reference.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+        let output = self.tmp.join(format!("remote-{}.vulns.json", safe.chars().take(120).collect::<String>()));
+        let mut argv: Vec<std::ffi::OsString> = vec![
+            self.bin.clone().into(),
+            "image".into(),
+            "--quiet".into(),
+            "--disable-telemetry".into(),
+            "--skip-version-check".into(),
+            "--image-src".into(),
+            "remote".into(),
+            "--platform".into(),
+            format!("linux/{}", go_arch()).into(),
+            "--scanners".into(),
+            "vuln".into(),
+            "--cache-dir".into(),
+            self.cache.clone().into(),
+            "--format".into(),
+            "json".into(),
+            "--output".into(),
+            output.clone().into(),
+        ];
+        if self.offline || self.db_checked.get() {
+            argv.push("--skip-db-update".into());
+        }
+        argv.push(reference.into());
+        let res = crate::collect::run(&argv, Duration::from_secs(900));
+        self.db_checked.set(true);
+        res?;
+        let text = std::fs::read(&output).with_context(|| format!("reading {}", output.display()))?;
+        let _ = std::fs::remove_file(&output);
+        parse("upstream", reference, &text)
+    }
+}
+
+fn go_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    }
+}
+
 fn is_kernel_pkg(name: &str) -> bool {
     ["linux-libc-dev", "linux-headers", "linux-image", "linux-modules", "linux-kbuild", "kernel-headers", "linux-lts", "linux-virt"]
         .iter()
@@ -150,6 +197,7 @@ pub fn parse(host: &str, image: &str, json: &[u8]) -> Result<Vec<Vuln>> {
                 epss: None,
                 new: false,
                 fingerprint: String::new(),
+                note: String::new(),
             };
             v.make_fingerprint();
             out.push(v);

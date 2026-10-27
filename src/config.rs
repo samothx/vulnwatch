@@ -20,6 +20,8 @@ pub struct Config {
     pub notify: Notify,
     pub email: Email,
     pub llm: Llm,
+    /// Human decisions about single vulnerabilities (`[[triage]]`): "not reachable here", …
+    pub triage: Vec<Triage>,
     /// Loaded from `collect.watch_dir`, not from this file.
     #[serde(skip)]
     pub watch: Vec<WatchEntry>,
@@ -104,6 +106,16 @@ pub struct Analyze {
     /// Image vulnerabilities are capped at this (KEV excepted) while the registry still serves the
     /// running build for its tag: `docker pull` would not change anything, so wait for upstream.
     pub image_current_max: Severity,
+    /// When the registry serves a newer build, scan it (`trivy image --image-src remote`) to see
+    /// which vulnerabilities it actually fixes; those it still ships count as "wait for upstream".
+    pub upstream_scan: bool,
+    /// Cap for findings with exposure `vpn` (only the admin's own devices reach them; KEV excepted).
+    pub vpn_max: Severity,
+    /// Cap for findings with exposure `trusted` (the admin plus a named customer; KEV excepted).
+    pub trusted_max: Severity,
+    /// Cap for lockfile vulnerabilities whose deployed image (`[[host]] deployed_as`) runs a
+    /// different version of the package, or already reports the same vulnerability itself.
+    pub lockfile_stale_max: Severity,
     /// EPSS probability at or above which a finding is raised one level.
     pub epss_raise: f64,
     /// Re-alert unresolved findings ≥ notify.min_severity after this many days.
@@ -124,6 +136,10 @@ impl Default for Analyze {
             unfixed_max: Severity::Low,
             image_os_max: Severity::Medium,
             image_current_max: Severity::Low,
+            upstream_scan: true,
+            vpn_max: Severity::Medium,
+            trusted_max: Severity::Low,
+            lockfile_stale_max: Severity::Low,
             epss_raise: 0.1,
             remind_days: 7,
             report_max_items: 15,
@@ -135,7 +151,11 @@ impl Default for Analyze {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Exposure {
+    /// Localhost / no published port.
     Local,
+    /// The admin plus a named outside party (e.g. a VPN customer's own vhost).
+    Trusted,
+    /// The admin's own VPN devices.
     Vpn,
     #[default]
     Public,
@@ -146,10 +166,52 @@ impl std::str::FromStr for Exposure {
     fn from_str(s: &str) -> Result<Self> {
         Ok(match s {
             "local" => Self::Local,
+            "trusted" => Self::Trusted,
             "vpn" => Self::Vpn,
             "public" => Self::Public,
-            o => bail!("unknown exposure '{o}' (local | vpn | public)"),
+            o => bail!("unknown exposure '{o}' (local | trusted | vpn | public)"),
         })
+    }
+}
+
+impl std::fmt::Display for Exposure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Local => "local",
+            Self::Trusted => "trusted",
+            Self::Vpn => "vpn",
+            Self::Public => "public",
+        })
+    }
+}
+
+/// `[[triage]]`: cap one vulnerability where a human checked it does not matter (not reachable,
+/// mitigated, …). KEV entries are never capped by triage. Expired entries are ignored and noted.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Triage {
+    /// CVE/GHSA/… id (aliases match too).
+    pub id: String,
+    /// Package glob (`brotli-libs`, `brotli*`); empty = any.
+    pub package: String,
+    /// Image reference, container name or lockfile path glob; empty = any.
+    pub component: String,
+    /// Host name; empty = any.
+    pub host: String,
+    pub max: Option<Severity>,
+    /// Why; shown next to the vulnerability.
+    pub reason: String,
+    /// "YYYY-MM-DD"; after this day the entry is ignored (re-check then).
+    pub until: String,
+}
+
+impl Triage {
+    pub fn until_date(&self) -> Option<chrono::NaiveDate> {
+        chrono::NaiveDate::parse_from_str(&self.until, "%Y-%m-%d").ok()
+    }
+
+    pub fn expired(&self, today: chrono::NaiveDate) -> bool {
+        self.until_date().is_some_and(|d| today > d)
     }
 }
 
@@ -168,11 +230,22 @@ pub struct HostCfg {
     /// Exposure of single images, keyed by image reference or container name (`*` wildcard):
     /// a database without published ports on a public web server is not public itself.
     pub image_exposure: BTreeMap<String, Exposure>,
+    /// Lockfile path glob → image reference/container glob (any host): what this source tree is
+    /// deployed as. Vulnerabilities are then compared with the package versions in that image.
+    pub deployed_as: BTreeMap<String, String>,
 }
 
 impl Default for HostCfg {
     fn default() -> Self {
-        Self { name: String::new(), exposure: Exposure::Public, stale_days: 2, context: String::new(), lockfile_exposure: None, image_exposure: BTreeMap::new() }
+        Self {
+            name: String::new(),
+            exposure: Exposure::Public,
+            stale_days: 2,
+            context: String::new(),
+            lockfile_exposure: None,
+            image_exposure: BTreeMap::new(),
+            deployed_as: BTreeMap::new(),
+        }
     }
 }
 
@@ -341,6 +414,14 @@ impl Config {
             }
             if w.osv.is_none() && w.github.is_empty() {
                 bail!("watch '{}': set osv and/or github, otherwise nothing is checked", w.name);
+            }
+        }
+        for t in &self.triage {
+            if t.id.is_empty() || t.reason.trim().is_empty() {
+                bail!("[[triage]] needs id and reason");
+            }
+            if !t.until.is_empty() && t.until_date().is_none() {
+                bail!("[[triage]] {}: until must be \"YYYY-MM-DD\"", t.id);
             }
         }
         if self.email.enabled && (self.email.to.is_empty() || self.email.from.is_empty()) {

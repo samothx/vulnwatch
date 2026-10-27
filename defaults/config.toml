@@ -30,20 +30,33 @@ feeds_max_age_hours = 20
 github_token_file = ""                      # optional; raises the GitHub API limit
 unfixed_max = "low"                         # cap for vulnerabilities without a fix (KEV excepted)
 image_os_max = "medium"                     # cap for OS packages inside images (KEV / high EPSS excepted)
-image_current_max = "low"                   # cap for image vulns while the registry serves the running build (nothing to pull; KEV excepted)
+image_current_max = "low"                   # cap for image vulns no pull can fix yet (registry serves the running build, or the newer build still ships them; KEV excepted)
+upstream_scan = true                        # newer build published → scan it remotely (trivy) to see what a pull fixes
+vpn_max = "medium"                          # cap for exposure "vpn" (KEV excepted)
+trusted_max = "low"                         # cap for exposure "trusted" (admin + a named outside party; KEV excepted)
+lockfile_stale_max = "low"                  # cap for source-tree vulns the deployed image doesn't have / reports itself
 epss_raise = 0.1                            # EPSS ≥ this → one severity level up
 remind_days = 7                             # re-push unresolved ≥ notify.min_severity
 report_max_items = 15                       # per finding in the Markdown (JSON has all)
 http_timeout_secs = 120
 
-# One block per host whose inventory is expected. exposure: public | vpn | local
-# (local lowers non-exploited findings one level). stale_days: report a missing/old inventory.
+# One block per host whose inventory is expected. exposure: public | vpn | trusted | local
+# (local lowers non-exploited findings one level; vpn / trusted cap at vpn_max / trusted_max).
+# stale_days: report a missing/old inventory.
 # [[host]]
 # name = "anubis"
 # exposure = "public"
 # stale_days = 2
 # context = "Debian web server: nginx in front of Docker apps."
 # lockfile_exposure = "public"              # lockfiles here belong to public apps (dev notebook)
+# image_exposure = { "db-*" = "local" }      # by image reference or container name
+# deployed_as = { "*/myapp/package-lock.json" = "registry.example/myapp:*" }
+
+# [[triage]]                                 # cap one vulnerability, with a reason (never KEV)
+# id = "CVE-…"
+# package = "brotli-libs"
+# reason = "not reachable: …"
+# until = "2026-12-31"
 
 [notify]
 enabled = false

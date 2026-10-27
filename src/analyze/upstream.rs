@@ -4,14 +4,109 @@
 //! When they are equal, `docker pull` cannot fix anything: the vulnerabilities are waiting for
 //! upstream, and the policy caps them (`image_current_max`) instead of paging every day.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
+use std::time::{Duration, SystemTime};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::inventory::Image;
 
 const ACCEPT: &str = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, \
                       application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json";
+
+/// What a newer published build still ships: (package, vulnerability id) pairs as Trivy names
+/// them for the running image, so they can be compared one to one. Cached per digest.
+pub fn still_ships(trivy: &super::trivy::Trivy, repository: &str, digest: &str, cache_dir: &Path, max_age_hours: u64) -> Result<BTreeSet<(String, String)>> {
+    let hex: String = digest.trim_start_matches("sha256:").chars().filter(char::is_ascii_hexdigit).collect();
+    if hex.len() != 64 {
+        bail!("unexpected digest {digest}");
+    }
+    let path = cache_dir.join(format!("{hex}.json"));
+    let fresh = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .is_ok_and(|t| SystemTime::now().duration_since(t).unwrap_or_default() < Duration::from_secs(max_age_hours * 3600));
+    if fresh
+        && let Ok(text) = std::fs::read_to_string(&path)
+        && let Ok(set) = serde_json::from_str::<BTreeSet<(String, String)>>(&text)
+    {
+        return Ok(set);
+    }
+    let vulns = trivy.scan_remote(&format!("{repository}@{digest}")).with_context(|| format!("scanning the newer build {repository}@{}", short(digest)))?;
+    let set: BTreeSet<(String, String)> = vulns.into_iter().map(|v| (v.package, v.id)).collect();
+    std::fs::create_dir_all(cache_dir).ok();
+    let _ = std::fs::write(&path, serde_json::to_vec(&set)?);
+    Ok(set)
+}
+
+/// Everything the analyzer knows about pulling a newer build of one image.
+#[derive(Debug, Clone)]
+pub struct Upstream {
+    pub status: Status,
+    /// The tag that was checked (`nginx:alpine`).
+    pub tag: String,
+    /// The containers run an older build of a tag that was pulled again since (untagged now).
+    pub recreate: bool,
+    /// `Newer` only: (package, id) pairs the newer build still ships; None = not scanned.
+    pub still: Option<BTreeSet<(String, String)>>,
+    pub scan_error: Option<String>,
+}
+
+impl Upstream {
+    /// No pull/recreate can fix this vulnerability yet.
+    pub fn waiting(&self, v: &crate::model::Vuln) -> bool {
+        match &self.status {
+            Status::Current { .. } => true,
+            Status::Newer { .. } => self.still.as_ref().is_some_and(|s| s.contains(&(v.package.clone(), v.id.clone()))),
+            Status::Unknown(_) => false,
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        let mut s = self.status.describe(&self.tag);
+        if self.recreate {
+            s.push_str(&format!("; the containers still run an older build of `{}` that was replaced locally", self.tag));
+        }
+        if let Some(still) = &self.still {
+            s.push_str(&format!("; that build was scanned: {} vulnerabilit(ies) still in it", still.len()));
+        }
+        if let Some(e) = &self.scan_error {
+            s.push_str(&format!("; scanning it failed ({})", crate::report::one_line(e)));
+        }
+        s
+    }
+
+    /// What to do about a finding of this image.
+    pub fn action(&self, f: &crate::model::Finding, img: &Image) -> String {
+        let n = f.vulns.iter().filter(|v| v.fix_available).count();
+        let fixed_by_newer = f.vulns.iter().filter(|v| v.fix_available && !self.waiting(v)).count();
+        let containers = img.containers.join(", ");
+        match &self.status {
+            Status::Current { .. } => format!(
+                "nothing to do yet: no newer {} is published (checked daily; alerts again once upstream ships a new build)",
+                self.tag
+            ),
+            Status::Newer { .. } if self.still.is_some() && fixed_by_newer == 0 => format!(
+                "nothing to do yet: the newest published {} still ships all {n} (scanned); alerts again once upstream fixes them",
+                self.tag
+            ),
+            Status::Newer { .. } => {
+                let how_many = if self.still.is_some() { format!(" (fixes {fixed_by_newer} of {n})") } else { String::new() };
+                if self.recreate {
+                    format!("recreate {containers} on {}: still running an older build of {}{how_many}; pull it first if the local tag is not the newest", f.host, self.tag)
+                } else {
+                    format!("a newer {} is published{how_many}: pull it and recreate {containers} on {}", self.tag, f.host)
+                }
+            }
+            Status::Unknown(why) if why.contains("locally built") => format!(
+                "rebuild {} (fresh base image + OS package upgrade) and recreate {containers} on {}",
+                f.component, f.host
+            ),
+            Status::Unknown(_) if self.recreate => format!("recreate {containers} on {}: still running an older build of {}", f.host, self.tag),
+            Status::Unknown(_) => format!("pull/rebuild a newer {} and recreate {containers} on {}", f.component, f.host),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {

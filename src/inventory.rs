@@ -72,6 +72,10 @@ pub struct Image {
     pub repo_digests: Vec<String>,
     /// Running containers using this image.
     pub containers: Vec<String>,
+    /// The image the containers were started with, when it no longer names this image (the tag
+    /// was pulled again since, so the containers run an older, now untagged build).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub configured: String,
     /// `org.opencontainers.image.version` label, if set.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub version_label: String,

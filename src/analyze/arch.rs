@@ -89,6 +89,7 @@ pub fn matches(inv: &Inventory, avgs: &[Avg]) -> Vec<Vuln> {
                 epss: None,
                 new: false,
                 fingerprint: String::new(),
+                note: String::new(),
             };
             v.make_fingerprint();
             out.push(v);

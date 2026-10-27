@@ -102,6 +102,9 @@ pub fn markdown(r: &Report, max_items: usize) -> String {
 fn finding_md(s: &mut String, f: &Finding, max_items: usize) {
     let new = if f.new_count > 0 { format!(" ({} new)", f.new_count) } else { String::new() };
     let _ = writeln!(s, "\n### [{}] {} · {}{new}\n", f.severity.to_string().to_uppercase(), f.host, one_line(&f.title));
+    if let Some(e) = f.exposure {
+        let _ = writeln!(s, "Exposure: {e}\n");
+    }
     if !f.action.is_empty() {
         let _ = writeln!(s, "**Action:** {}\n", one_line(&f.action));
     }
@@ -140,10 +143,11 @@ pub fn vuln_line(v: &Vuln) -> String {
         None => v.installed.clone(),
     };
     let link = if v.url.is_empty() { v.id.clone() } else { format!("[{}]({})", v.id, v.url) };
-    format!("{} {link}{tags} · `{}` {fix} · {}", v.severity, one_line(&v.package), one_line(&v.title))
+    let note = if v.note.is_empty() { String::new() } else { format!(" · _{}_", one_line(&v.note)) };
+    format!("{} {link}{tags} · `{}` {fix} · {}{note}", v.severity, one_line(&v.package), one_line(&v.title))
 }
 
-fn one_line(s: &str) -> String {
+pub fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

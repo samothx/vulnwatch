@@ -216,7 +216,10 @@ fn cmd_run(cfg: &Config, dry_run: bool, print: bool, no_llm: bool, offline: bool
 
     if cfg.llm.enabled && !no_llm && !rep.findings.is_empty() {
         match summary::summarize(cfg, &rep) {
-            Ok(s) => rep.summary = Some(s),
+            Ok((s, dropped)) => {
+                rep.summary = Some(s);
+                rep.notes.extend(dropped);
+            }
             Err(e) => rep.errors.push(format!("llm summary: {e:#}")),
         }
     }

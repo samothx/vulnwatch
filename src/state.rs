@@ -156,6 +156,7 @@ mod tests {
             epss: None,
             new: false,
             fingerprint: String::new(),
+            note: String::new(),
         };
         v.make_fingerprint();
         v

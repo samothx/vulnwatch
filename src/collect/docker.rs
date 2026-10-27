@@ -61,7 +61,15 @@ pub fn collect(cfg: &Collect, timeout: Duration, errors: &mut Vec<String>) -> Re
         let Some(ii) = parsed.into_iter().next() else { continue };
         let repo_tags = ii.repo_tags.unwrap_or_default();
         // Prefer the reference the container was started with when it is still a tag of the image.
-        let reference = if repo_tags.contains(&configured) { configured } else { repo_tags.first().cloned().unwrap_or_else(|| ii.id.clone()) };
+        let (reference, configured) = if repo_tags.contains(&configured) {
+            (configured, String::new())
+        } else {
+            // Kept only for untagged images (the tag was pulled again since), and only if it is a
+            // real tag, not an id or digest the container was started with.
+            let real_tag = !configured.starts_with("sha256:") && !configured.contains('@') && !ii.id.contains(&configured);
+            let keep = if repo_tags.is_empty() && real_tag { configured } else { String::new() };
+            (repo_tags.first().cloned().unwrap_or_else(|| ii.id.clone()), keep)
+        };
         let version_label = ii.config.and_then(|c| c.labels).and_then(|l| l.get("org.opencontainers.image.version").cloned()).unwrap_or_default();
         let mut img = Image {
             reference,
@@ -69,6 +77,7 @@ pub fn collect(cfg: &Collect, timeout: Duration, errors: &mut Vec<String>) -> Re
             repo_tags,
             repo_digests: ii.repo_digests.unwrap_or_default(),
             containers,
+            configured,
             version_label,
             sbom: None,
         };

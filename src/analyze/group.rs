@@ -51,6 +51,7 @@ pub fn group(vulns: Vec<Vuln>, pkg_manager: &BTreeMap<String, String>) -> (Vec<F
             detail: String::new(),
             new_count,
             remind: false,
+            exposure: None,
         });
     }
     (findings, unfixed)
@@ -75,7 +76,7 @@ fn describe(host: &str, kind: Kind, component: &str, vs: &[Vuln], mgr: Option<&s
         Kind::Image => (format!("{n} fixable vulnerabilities in image {component}"), format!("pull/rebuild a newer {component} and recreate its containers on {host}")),
         Kind::Lockfile => {
             let tool = if component.ends_with("Cargo.lock") { "cargo update" } else { "npm update / npm audit fix" };
-            (format!("{n} vulnerable dependencies in {component}"), format!("`{tool}` in {} on {host}, then rebuild/redeploy", parent(component)))
+            (format!("{n} vulnerable dependencies in source tree {component}"), format!("`{tool}` in {} on {host}, then rebuild/redeploy", parent(component)))
         }
         Kind::Watch => {
             let installed = vs.first().map(|v| v.installed.as_str()).unwrap_or("?");
@@ -114,6 +115,7 @@ mod tests {
             epss: None,
             new: true,
             fingerprint: String::new(),
+            note: String::new(),
         };
         v.make_fingerprint();
         v

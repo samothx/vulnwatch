@@ -10,6 +10,8 @@ pub mod policy;
 pub mod trivy;
 pub mod upstream;
 
+mod deployed;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -22,6 +24,7 @@ use crate::feeds::{self, Fetcher};
 use crate::inventory::Inventory;
 use crate::model::{Finding, HostSummary, Kind, Report, Vuln};
 use crate::state::State;
+use upstream::Upstream;
 
 pub struct Options {
     pub offline: bool,
@@ -94,8 +97,10 @@ pub fn run(cfg: &Config, opts: &Options, state: &mut State) -> Result<Report> {
             None
         });
     let registry = upstream::Registry::new(fetcher.agent(), opts.offline);
-    // (host, image reference) → is a newer build published?
-    let mut upstreams: BTreeMap<(String, String), upstream::Status> = BTreeMap::new();
+    // (host, image reference) → is a newer build published, and what does it still ship?
+    let mut upstreams: BTreeMap<(String, String), Upstream> = BTreeMap::new();
+    // (host, kind, component) → exposure used by the policy (most exposed vuln of the component).
+    let mut exposures: BTreeMap<(String, Kind, String), Exposure> = BTreeMap::new();
     let github = outdated::GitHub::new(fetcher.agent(), gh_token, feeds_dir.join("github"), cfg.analyze.feeds_max_age_hours, opts.offline);
 
     let mut vulns: Vec<Vuln> = Vec::new();
@@ -186,18 +191,25 @@ pub fn run(cfg: &Config, opts: &Options, state: &mut State) -> Result<Report> {
             }
         }
 
-        // Upstream check, only for images that have something to report
-        let vulnerable: BTreeSet<&str> = host_vulns.iter().filter(|v| v.kind == Kind::Image).map(|v| v.component.as_str()).collect();
+        // Upstream check, only for images that have something fixable to report
+        let vulnerable: BTreeSet<&str> = host_vulns.iter().filter(|v| v.kind == Kind::Image && v.fix_available).map(|v| v.component.as_str()).collect();
         for img in inv.images.iter().filter(|i| vulnerable.contains(i.reference.as_str())) {
-            upstreams.insert((inv.host.clone(), img.reference.clone()), registry.status(img));
+            let up = upstream_for(img, &registry, &trivy, cfg, &feeds_dir.join("upstream"), &mut errors);
+            upstreams.insert((inv.host.clone(), img.reference.clone()), up);
         }
 
         // Policy
         for v in host_vulns.iter_mut() {
             intel.annotate(v);
             let exp = exposure_for(inv, v, &hc);
-            let current = v.kind == Kind::Image && upstreams.get(&(inv.host.clone(), v.component.clone())).is_some_and(upstream::Status::is_current);
-            policy::apply(v, exp, current, &cfg.analyze);
+            let up = (v.kind == Kind::Image).then(|| upstreams.get(&(inv.host.clone(), v.component.clone()))).flatten();
+            let waiting = up.is_some_and(|u| u.waiting(v));
+            if waiting && up.is_some_and(|u| !u.status.is_current()) {
+                v.note = "the newest published build still ships it".into();
+            }
+            policy::apply(v, exp, waiting, &cfg.analyze);
+            let e = exposures.entry((v.host.clone(), v.kind, v.component.clone())).or_insert(exp);
+            *e = (*e).max(exp);
         }
         vulns.extend(host_vulns);
 
@@ -224,6 +236,7 @@ pub fn run(cfg: &Config, opts: &Options, state: &mut State) -> Result<Report> {
                             detail: format!("https://github.com/{}/releases", w.github),
                             new_count: 0,
                             remind: false,
+                            exposure: None,
                             fingerprint: format!("{}|Outdated|{}|{}|{}", inv.host, w.name, w.version, latest),
                         });
                     }
@@ -264,25 +277,32 @@ pub fn run(cfg: &Config, opts: &Options, state: &mut State) -> Result<Report> {
         }
     }
 
+    // Source trees vs. what is deployed, then human triage; both only lower severities.
+    let deployed = deployed::compare(cfg, &inventories, &mut vulns);
+    triage(cfg, &mut vulns, &inventories, now.date_naive(), &mut notes);
+
     let resolved = state.diff_vulns(&mut vulns, &covered, now.timestamp());
     let (mut findings, unfixed) = group::group(vulns, &pkg_managers);
-    // Image findings: which containers run it (untagged images are otherwise just a digest).
+    for f in findings.iter_mut() {
+        f.exposure = exposures.get(&(f.host.clone(), f.kind, f.component.clone())).copied();
+    }
+    // Image findings: which containers run it (untagged images are otherwise just a digest), and
+    // whether pulling would change anything.
     for f in findings.iter_mut().filter(|f| f.kind == Kind::Image) {
-        if let Some(img) = inventories.iter().filter(|i| i.host == f.host).flat_map(|i| &i.images).find(|i| i.reference == f.component) {
-            f.detail = format!("Containers: {}", img.containers.join(", "));
-            if img.repo_tags.is_empty() {
-                f.title = format!("{} (untagged image of {})", f.title, img.containers.join(", "));
-            }
-            if let Some(up) = upstreams.get(&(f.host.clone(), f.component.clone())) {
-                f.detail = format!("{}\n\n{}", f.detail, up.describe(img.tag().unwrap_or(&img.reference)));
-                match up {
-                    upstream::Status::Current { .. } => {
-                        f.action = format!("nothing to do yet: no newer {} is published (checked daily; alerts again once upstream ships a new build)", f.component)
-                    }
-                    upstream::Status::Newer { .. } => f.action = format!("a newer {} is published: pull it and recreate its containers on {}", f.component, f.host),
-                    upstream::Status::Unknown(_) => {}
-                }
-            }
+        let Some(img) = inventories.iter().filter(|i| i.host == f.host).flat_map(|i| &i.images).find(|i| i.reference == f.component) else { continue };
+        f.detail = format!("Containers: {}", img.containers.join(", "));
+        if img.repo_tags.is_empty() {
+            let was = if img.configured.is_empty() { String::new() } else { format!(", started as {}", img.configured) };
+            f.title = format!("{} (untagged image of {}{was})", f.title, img.containers.join(", "));
+        }
+        if let Some(up) = upstreams.get(&(f.host.clone(), f.component.clone())) {
+            f.detail = format!("{}\n\n{}", f.detail, up.describe());
+            f.action = up.action(f, img);
+        }
+    }
+    for f in findings.iter_mut().filter(|f| f.kind == Kind::Lockfile) {
+        if let Some(d) = deployed.get(&(f.host.clone(), f.component.clone())) {
+            f.detail = d.describe(f);
         }
     }
     findings.extend(extra);
@@ -312,6 +332,60 @@ pub fn run(cfg: &Config, opts: &Options, state: &mut State) -> Result<Report> {
         notes,
         errors,
     })
+}
+
+/// Registry check for one image; for an untagged image (tag pulled again since) the tag the
+/// containers were started with is checked. A newer build is scanned to see what it still ships.
+fn upstream_for(img: &crate::inventory::Image, registry: &upstream::Registry, trivy: &trivy::Trivy, cfg: &Config, cache: &std::path::Path, errors: &mut Vec<String>) -> Upstream {
+    let recreate = img.repo_tags.is_empty() && !img.configured.is_empty();
+    let probe = if recreate { crate::inventory::Image { reference: img.configured.clone(), ..img.clone() } } else { img.clone() };
+    let status = registry.status(&probe);
+    let tag = probe.reference.clone();
+    let mut up = Upstream { status, tag, recreate, still: None, scan_error: None };
+    if let upstream::Status::Newer { digest } = &up.status
+        && cfg.analyze.upstream_scan
+        && trivy.available()
+        && !trivy.offline
+    {
+        match upstream::still_ships(trivy, probe.repository(), digest, cache, cfg.analyze.feeds_max_age_hours) {
+            Ok(set) => up.still = Some(set),
+            Err(e) => {
+                errors.push(format!("upstream scan {}: {e:#}", probe.reference));
+                up.scan_error = Some(format!("{e:#}"));
+            }
+        }
+    }
+    up
+}
+
+/// `[[triage]]`: caps matching vulnerabilities (never KEV ones) and says why.
+fn triage(cfg: &Config, vulns: &mut [Vuln], inventories: &[Inventory], today: chrono::NaiveDate, notes: &mut Vec<String>) {
+    let active: Vec<&crate::config::Triage> = cfg.triage.iter().filter(|t| !t.expired(today)).collect();
+    for t in cfg.triage.iter().filter(|t| t.expired(today)) {
+        notes.push(format!("triage of {} expired on {}: re-check it, then extend or remove the entry", t.id, t.until));
+    }
+    if active.is_empty() {
+        return;
+    }
+    for v in vulns.iter_mut().filter(|v| !v.kev) {
+        let containers: Vec<&str> = if v.kind == Kind::Image {
+            inventories.iter().filter(|i| i.host == v.host).flat_map(|i| &i.images).filter(|i| i.reference == v.component).flat_map(|i| i.containers.iter().map(String::as_str)).collect()
+        } else {
+            Vec::new()
+        };
+        let pkg = v.package.split(' ').next().unwrap_or(&v.package).to_string();
+        let hit = active.iter().find(|t| {
+            (t.id == v.id || v.aliases.contains(&t.id))
+                && (t.host.is_empty() || t.host == v.host)
+                && (t.package.is_empty() || glob(&t.package, &pkg) || glob(&t.package, &v.package))
+                && (t.component.is_empty() || glob(&t.component, &v.component) || containers.iter().any(|c| glob(&t.component, c)))
+        });
+        if let Some(t) = hit {
+            v.severity = v.severity.min(t.max.unwrap_or(Severity::Low));
+            let until = if t.until.is_empty() { String::new() } else { format!(" (until {})", t.until) };
+            v.note = format!("triaged: {}{until}", t.reason.trim());
+        }
+    }
 }
 
 fn load_feed<T>(fetcher: &Fetcher, feed: &feeds::Feed, parse: fn(&std::path::Path) -> Result<T>, errors: &mut Vec<String>) -> Option<T> {
@@ -346,22 +420,26 @@ fn exposure_for(inv: &Inventory, v: &Vuln, host: &crate::config::HostCfg) -> Exp
     host.exposure
 }
 
-/// The most exposed matching entry: an image shared by several containers is as exposed as the
-/// most exposed of them.
+/// Exposure of an image from `image_exposure`: an entry for the image reference sets the default
+/// for its containers, an entry for a container name overrides it for that container, and the
+/// image is as exposed as its most exposed container (unlisted containers keep the host default).
+/// None when no entry matches at all.
 fn image_exposure(inv: &Inventory, reference: &str, host: &crate::config::HostCfg) -> Option<Exposure> {
     if host.image_exposure.is_empty() {
         return None;
     }
     let containers = inv.images.iter().find(|i| i.reference == reference).map(|i| i.containers.as_slice()).unwrap_or_default();
-    host.image_exposure
-        .iter()
-        .filter(|(pat, _)| glob(pat, reference) || containers.iter().any(|c| glob(pat, c)))
-        .map(|(_, e)| *e)
-        .max()
+    let matching = |name: &str| host.image_exposure.iter().filter(|(pat, _)| glob(pat, name)).map(|(_, e)| *e).max();
+    let by_ref = matching(reference);
+    if by_ref.is_none() && !containers.iter().any(|c| matching(c).is_some()) {
+        return None;
+    }
+    let base = by_ref.unwrap_or(host.exposure);
+    containers.iter().map(|c| matching(c).unwrap_or(base)).max().or(Some(base))
 }
 
 /// `*` matches any run of characters; everything else literally.
-fn glob(pat: &str, s: &str) -> bool {
+pub(crate) fn glob(pat: &str, s: &str) -> bool {
     let parts: Vec<&str> = pat.split('*').collect();
     if parts.len() == 1 {
         return pat == s;
@@ -393,6 +471,7 @@ fn health(host: &str, sev: Severity, title: String, detail: String, key: &str) -
         detail: if detail.is_empty() { detail } else { format!("- {detail}") },
         new_count: 0,
         remind: false,
+        exposure: None,
         fingerprint: format!("{host}|Health|{key}"),
     }
 }
@@ -421,9 +500,12 @@ mod tests {
         let mut hc = crate::config::HostCfg::default();
         assert_eq!(image_exposure(&inv, "postgres:15-alpine", &hc), None);
         hc.image_exposure.insert("umami-db".into(), Exposure::Local);
-        assert_eq!(image_exposure(&inv, "postgres:15-alpine", &hc), Some(Exposure::Local));
+        assert_eq!(image_exposure(&inv, "postgres:15-alpine", &hc), Some(Exposure::Public), "unlisted other-db keeps the host default");
         hc.image_exposure.insert("other-*".into(), Exposure::Vpn);
         assert_eq!(image_exposure(&inv, "postgres:15-alpine", &hc), Some(Exposure::Vpn), "most exposed container wins");
+        hc.image_exposure.insert("postgres:*".into(), Exposure::Trusted);
+        hc.image_exposure.remove("other-*");
+        assert_eq!(image_exposure(&inv, "postgres:15-alpine", &hc), Some(Exposure::Trusted), "reference entry is the default for its containers");
         assert_eq!(image_exposure(&inv, "nginx:alpine", &hc), None);
     }
 }

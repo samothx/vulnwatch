@@ -71,7 +71,9 @@ impl Intel {
 /// Order matters: EPSS adjusts the source severity, then findings without a fix, OS packages
 /// inside images and image vulnerabilities no pull can fix yet (`waiting_upstream`) are capped,
 /// then exposure applies to that result (`local`: one level lower, min low; `vpn` / `trusted`:
-/// capped), and finally KEV (exploited in the wild) overrides everything.
+/// capped), and finally KEV (exploited in the wild) sets a floor: critical only when the finding is
+/// public and a pull fixes it today; high otherwise (not public, no fix, or the newest upstream build
+/// still ships it — then the fix is an own rebuild, see `upstream::action`).
 ///
 /// A high EPSS lifts an image OS-package vulnerability at most one level above `image_os_max`:
 /// EPSS rates the library bug in general, not whether this image ever feeds it attacker input
@@ -100,9 +102,15 @@ pub fn apply(v: &mut Vuln, exposure: Exposure, waiting_upstream: bool, cfg: &Ana
         }
     }
     if v.kev {
-        s = s.max(if v.fix_available { Severity::Critical } else { Severity::High });
+        s = s.max(kev_floor(v.fix_available && !waiting_upstream, exposure));
     }
     v.severity = s;
+}
+
+/// Least severity of a KEV finding: it is always pushed (high), but only shouts (critical) where the
+/// internet reaches it and pulling a newer build fixes it right now.
+pub fn kev_floor(pull_fixes: bool, exposure: Exposure) -> Severity {
+    if pull_fixes && exposure == Exposure::Public { Severity::Critical } else { Severity::High }
 }
 
 #[cfg(test)]
@@ -162,7 +170,11 @@ mod tests {
         assert_eq!(img.severity, Severity::Low, "nothing newer to pull: wait for upstream");
         img.kev = true;
         apply(&mut img, Exposure::Public, true, &cfg);
-        assert_eq!(img.severity, Severity::Critical, "KEV still shouts");
+        assert_eq!(img.severity, Severity::High, "KEV the newest build still ships: own rebuild, high");
+        apply(&mut img, Exposure::Public, false, &cfg);
+        assert_eq!(img.severity, Severity::Critical, "public KEV a pull fixes: critical");
+        apply(&mut img, Exposure::Local, false, &cfg);
+        assert_eq!(img.severity, Severity::High, "local KEV: high, not critical");
         let mut i = vuln(Severity::Info, true);
         i.epss = Some(0.9);
         apply(&mut i, Exposure::Public, false, &cfg);
@@ -179,7 +191,11 @@ mod tests {
         assert_eq!(v.severity, Severity::Low, "trusted caps at low");
         v.kev = true;
         apply(&mut v, Exposure::Trusted, false, &cfg);
-        assert_eq!(v.severity, Severity::Critical, "KEV beats exposure caps");
+        assert_eq!(v.severity, Severity::High, "KEV beats exposure caps, but only public KEV is critical");
+        apply(&mut v, Exposure::Vpn, false, &cfg);
+        assert_eq!(v.severity, Severity::High);
+        apply(&mut v, Exposure::Public, false, &cfg);
+        assert_eq!(v.severity, Severity::Critical);
     }
 
     #[test]

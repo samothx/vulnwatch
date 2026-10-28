@@ -57,8 +57,11 @@ Applied to every vulnerability, in this order:
 7. Source trees (lockfiles) deployed as an image (`deployed_as`): capped at `lockfile_stale_max`
    (low) where the deployed image runs another version and isn't affected, or reports the same
    vulnerability itself (see below).
-8. CISA KEV (exploited in the wild): at least high, critical when a fix exists.
-9. `[[triage]]`: a human decision caps one vulnerability (never a KEV one), shown with its reason.
+8. CISA KEV (exploited in the wild): at least high; critical only when it is public and pulling a newer
+   build fixes it today. When the newest published build still ships it, the action says to rebuild on top
+   of the tag with an OS package upgrade instead of "nothing to do yet".
+9. `[[triage]]`: a human decision caps one vulnerability, shown with its reason. A KEV one only with an
+   `until` date and never below medium.
 
 **Upstream check.** An anonymous `HEAD /v2/<repo>/manifests/<tag>` against the image's registry
 (bearer token from the registry's own https realm), compared with the image's `RepoDigests`. When

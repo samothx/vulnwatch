@@ -186,7 +186,7 @@ impl std::fmt::Display for Exposure {
 }
 
 /// `[[triage]]`: cap one vulnerability where a human checked it does not matter (not reachable,
-/// mitigated, …). KEV entries are never capped by triage. Expired entries are ignored and noted.
+/// mitigated, …). KEV entries only with `until`, and never below medium. Expired entries are ignored and noted.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Triage {

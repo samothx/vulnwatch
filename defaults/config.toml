@@ -52,7 +52,7 @@ http_timeout_secs = 120
 # image_exposure = { "db-*" = "local" }      # by image reference or container name
 # deployed_as = { "*/myapp/package-lock.json" = "registry.example/myapp:*" }
 
-# [[triage]]                                 # cap one vulnerability, with a reason (never KEV)
+# [[triage]]                                 # cap one vulnerability, with a reason (KEV: needs until, min medium)
 # id = "CVE-…"
 # package = "brotli-libs"
 # reason = "not reachable: …"

@@ -78,9 +78,25 @@ impl Upstream {
 
     /// What to do about a finding of this image.
     pub fn action(&self, f: &crate::model::Finding, img: &Image) -> String {
+        let containers = img.containers.join(", ");
+        let base = self.pull_action(f, &containers);
+        // Exploited in the wild, fixed by the distro/package, but no published build has it yet:
+        // waiting is not an option, the fix is an own rebuild on top of the tag.
+        let kev: Vec<&crate::model::Vuln> = f.vulns.iter().filter(|v| v.kev && v.fix_available && self.waiting(v)).collect();
+        if kev.is_empty() {
+            return base;
+        }
+        let rebuild = kev_rebuild(&self.tag, &kev);
+        if base.starts_with("nothing to do yet") {
+            format!("{rebuild}, then recreate {containers} on {}", f.host)
+        } else {
+            format!("{base}; and {rebuild}")
+        }
+    }
+
+    fn pull_action(&self, f: &crate::model::Finding, containers: &str) -> String {
         let n = f.vulns.iter().filter(|v| v.fix_available).count();
         let fixed_by_newer = f.vulns.iter().filter(|v| v.fix_available && !self.waiting(v)).count();
-        let containers = img.containers.join(", ");
         match &self.status {
             Status::Current { .. } => format!(
                 "nothing to do yet: no newer {} is published (checked daily; alerts again once upstream ships a new build)",
@@ -256,12 +272,117 @@ fn parse_challenge(h: &str) -> Option<Challenge> {
     Some(Challenge { realm: kv.remove("realm")?, service: kv.remove("service"), scope: kv.remove("scope") })
 }
 
+/// "rebuild on top of nginx:alpine with `apk upgrade --no-cache` (exploited CVE-… in brotli-libs is
+/// fixed in the distro, the newest nginx:alpine still ships it)".
+fn kev_rebuild(tag: &str, kev: &[&crate::model::Vuln]) -> String {
+    let os = |v: &crate::model::Vuln| v.source == "trivy-os";
+    let distro = |d: &str| kev.iter().any(|v| os(v) && v.package.contains(&format!("({d}")));
+    let how = if kev.iter().all(|v| os(v)) {
+        if distro("alpine") && !distro("debian") && !distro("ubuntu") {
+            "with `apk upgrade --no-cache`".to_string()
+        } else if !distro("alpine") && (distro("debian") || distro("ubuntu")) {
+            "with `apt-get upgrade`".to_string()
+        } else {
+            "with an OS package upgrade".to_string()
+        }
+    } else {
+        "with the fixed package versions".to_string()
+    };
+    let mut ids: Vec<&str> = kev.iter().map(|v| v.id.as_str()).collect();
+    ids.dedup();
+    let mut pkgs: Vec<String> = kev
+        .iter()
+        .map(|v| {
+            let p = v.package.split(" (").next().unwrap_or(&v.package);
+            match &v.fixed {
+                Some(fx) if !fx.is_empty() => format!("{p} → {fx}"),
+                _ => p.to_string(),
+            }
+        })
+        .collect();
+    pkgs.sort();
+    pkgs.dedup();
+    format!(
+        "rebuild on top of {tag} {how} (exploited in the wild: {} in {}; fixed upstream of the image, but the newest {tag} still ships it)",
+        ids.join(", "),
+        pkgs.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn img(reference: &str, digests: &[&str]) -> Image {
         Image { reference: reference.into(), repo_digests: digests.iter().map(|s| s.to_string()).collect(), ..Default::default() }
+    }
+
+    fn vuln(id: &str, package: &str, fixed: &str, kev: bool) -> crate::model::Vuln {
+        crate::model::Vuln {
+            id: id.into(),
+            aliases: vec![],
+            host: "web1".into(),
+            kind: crate::model::Kind::Image,
+            component: "sha256:3dd0".into(),
+            package: package.into(),
+            installed: "1".into(),
+            fixed: Some(fixed.into()),
+            fix_available: true,
+            base_severity: opskit::Severity::Critical,
+            severity: opskit::Severity::Critical,
+            title: String::new(),
+            url: String::new(),
+            source: "trivy-os".into(),
+            kev,
+            epss: None,
+            new: false,
+            fingerprint: String::new(),
+            note: String::new(),
+        }
+    }
+
+    fn finding(vulns: Vec<crate::model::Vuln>) -> crate::model::Finding {
+        crate::model::Finding {
+            host: "web1".into(),
+            kind: crate::model::Kind::Image,
+            component: "sha256:3dd0".into(),
+            severity: opskit::Severity::Critical,
+            title: String::new(),
+            action: String::new(),
+            vulns,
+            unfixed: Default::default(),
+            detail: String::new(),
+            new_count: 0,
+            remind: false,
+            fingerprint: String::new(),
+            exposure: None,
+        }
+    }
+
+    #[test]
+    fn kev_the_newest_build_still_ships_means_rebuild() {
+        let brotli = vuln("CVE-2026-111497", "brotli-libs (alpine)", "1.2.1-r0", true);
+        let other = vuln("CVE-9", "zlib (alpine)", "1.3.2-r1", false);
+        let still: BTreeSet<(String, String)> = [(brotli.package.clone(), brotli.id.clone())].into();
+        let up = Upstream { status: Status::Newer { digest: "sha256:a3".into() }, tag: "nginx:alpine".into(), recreate: true, still: Some(still), scan_error: None };
+        let image = Image { reference: "sha256:3dd0".into(), containers: vec!["site-a".into()], ..Default::default() };
+
+        let a = up.action(&finding(vec![brotli.clone(), other.clone()]), &image);
+        assert!(a.starts_with("recreate site-a on web1"), "{a}");
+        assert!(a.contains("; and rebuild on top of nginx:alpine with `apk upgrade --no-cache`"), "{a}");
+        assert!(a.contains("CVE-2026-111497 in brotli-libs → 1.2.1-r0"), "{a}");
+
+        let a = up.action(&finding(vec![brotli.clone()]), &image);
+        assert!(a.starts_with("rebuild on top of nginx:alpine with `apk upgrade --no-cache`"), "no 'nothing to do yet' for KEV: {a}");
+        assert!(a.ends_with("then recreate site-a on web1"), "{a}");
+
+        let mut plain = brotli.clone();
+        plain.kev = false;
+        let a = up.action(&finding(vec![plain]), &image);
+        assert!(a.starts_with("nothing to do yet"), "not exploited: keep waiting: {a}");
+
+        let deb = vuln("CVE-2026-111497", "libbrotli1 (debian)", "1.1.0-2+deb13u1", true);
+        assert!(kev_rebuild("wordpress:latest", &[&deb]).contains("with `apt-get upgrade`"));
     }
 
     #[test]

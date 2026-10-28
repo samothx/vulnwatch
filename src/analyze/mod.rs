@@ -358,7 +358,8 @@ fn upstream_for(img: &crate::inventory::Image, registry: &upstream::Registry, tr
     up
 }
 
-/// `[[triage]]`: caps matching vulnerabilities (never KEV ones) and says why.
+/// `[[triage]]`: caps matching vulnerabilities and says why. Exploited ones (KEV) only with an
+/// `until` date and never below medium, so they stay visible until the next re-check.
 fn triage(cfg: &Config, vulns: &mut [Vuln], inventories: &[Inventory], today: chrono::NaiveDate, notes: &mut Vec<String>) {
     let active: Vec<&crate::config::Triage> = cfg.triage.iter().filter(|t| !t.expired(today)).collect();
     for t in cfg.triage.iter().filter(|t| t.expired(today)) {
@@ -367,7 +368,8 @@ fn triage(cfg: &Config, vulns: &mut [Vuln], inventories: &[Inventory], today: ch
     if active.is_empty() {
         return;
     }
-    for v in vulns.iter_mut().filter(|v| !v.kev) {
+    let mut kev_without_until = std::collections::BTreeSet::new();
+    for v in vulns.iter_mut() {
         let containers: Vec<&str> = if v.kind == Kind::Image {
             inventories.iter().filter(|i| i.host == v.host).flat_map(|i| &i.images).filter(|i| i.reference == v.component).flat_map(|i| i.containers.iter().map(String::as_str)).collect()
         } else {
@@ -381,10 +383,22 @@ fn triage(cfg: &Config, vulns: &mut [Vuln], inventories: &[Inventory], today: ch
                 && (t.component.is_empty() || glob(&t.component, &v.component) || containers.iter().any(|c| glob(&t.component, c)))
         });
         if let Some(t) = hit {
-            v.severity = v.severity.min(t.max.unwrap_or(Severity::Low));
+            let mut max = t.max.unwrap_or(Severity::Low);
+            if v.kev {
+                if t.until.is_empty() {
+                    kev_without_until.insert(t.id.clone());
+                    continue;
+                }
+                max = max.max(Severity::Medium);
+            }
+            v.severity = v.severity.min(max);
             let until = if t.until.is_empty() { String::new() } else { format!(" (until {})", t.until) };
-            v.note = format!("triaged: {}{until}", t.reason.trim());
+            let kev = if v.kev { "; exploited in the wild, kept at medium or above" } else { "" };
+            v.note = format!("triaged: {}{until}{kev}", t.reason.trim());
         }
+    }
+    for id in kev_without_until {
+        notes.push(format!("triage of {id} not applied: it is exploited in the wild (KEV), which needs an `until` date"));
     }
 }
 
@@ -480,6 +494,31 @@ fn health(host: &str, sev: Severity, title: String, detail: String, key: &str) -
 mod tests {
     use super::*;
     use crate::inventory::Image;
+
+    #[test]
+    fn triage_kev_needs_until_and_keeps_medium() {
+        let mut cfg = Config::default();
+        let t = |until: &str| crate::config::Triage { id: "CVE-1".into(), reason: "not reachable".into(), until: until.into(), ..Default::default() };
+        let mk = |kev: bool| Vuln {
+            id: "CVE-1".into(), aliases: vec![], host: "h".into(), kind: Kind::Image, component: "c".into(),
+            package: "p".into(), installed: "1".into(), fixed: None, fix_available: true,
+            base_severity: Severity::Critical, severity: Severity::High, title: String::new(), url: String::new(),
+            source: "trivy-os".into(), kev, epss: None, new: false, fingerprint: String::new(), note: String::new(),
+        };
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+        let mut notes = Vec::new();
+        cfg.triage = vec![t("")];
+        let mut v = vec![mk(true), mk(false)];
+        triage(&cfg, &mut v, &[], today, &mut notes);
+        assert_eq!(v[0].severity, Severity::High, "KEV without until: not applied");
+        assert_eq!(v[1].severity, Severity::Low);
+        assert!(notes.iter().any(|n| n.contains("needs an `until` date")));
+        cfg.triage = vec![t("2026-12-31")];
+        let mut v = vec![mk(true)];
+        triage(&cfg, &mut v, &[], today, &mut notes);
+        assert_eq!(v[0].severity, Severity::Medium, "KEV triage never below medium");
+        assert!(v[0].note.contains("exploited in the wild"));
+    }
 
     #[test]
     fn globs() {
